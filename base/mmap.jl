@@ -84,35 +84,37 @@ const FILE_MAP_EXECUTE       = UInt32(0x20)
 end # @windows_only
 
 # core impelementation of mmap
-type Stream <: IO
-    ptr::Ptr{Void}    # pointer to mmapped-memory
-    handle::Ptr{Void} # only needed on windows for file mapping object
-    len::Int          # amount of memory mapped
-    offset::FileOffset
-    pos::Int64
-    name
+type Array{T,N} <: AbstractArray{T,N}
+    array::Base.Array{T,N} # array of memory-mapped data
+    ptr::Ptr{Void}         # pointer to start of memory-mapped data
+    handle::Ptr{Void}      # only needed on windows for file mapping object
+    isreadable::Bool
+    iswritable::Bool
+    offset::Int64          # used in munmap on unix
 
-    function Stream{T<:IO}(io::T, len::Integer=filesize(io), offset::Integer=0; finalize::Bool=true, grow::Bool=true)
+    function Mmap`.Array{T,N}(::Type{T}, io::IO, dims::NTuple{N,Integer}=(filesize(io),), offset::Integer=position(io); grow::Bool=true)
         # check inputs
         isopen(io) || throw(ArgumentError("$io must be open to mmap"))
         applicable(fd,io) || throw(ArgumentError("method `fd(::$T)` doesn't exist, unable to mmap $io"))
         # Check that none of the computations will overflow
+        len = prod(dims) * sizeof(T)
         len >= 0 || throw(ArgumentError("requested size must be ≥ 0, got $len"))
-        ps = pagesize()
+        ps = Mmap`.pagesize()
         len < typemax(Int)-ps || throw(ArgumentError("requested size must be < $(typemax(Int)-ps), got $len"))
 
         offset >= 0 || throw(ArgumentError("requested offset must be ≥ 0, got $offset"))
         offset > filesize(io) && throw(ArgumentError("requested offset is beyond size of file: $offset > $(filesize(io))"))
 
         # Set the offset to a page boundary
-        offset_page::FileOffset = div(offset,ps)*ps
-        len_page::Int = (offset-offset_page) + len
+        offset_page::FileOffset = div(offset,ps) * ps #DIFF
+        delta::FileOffset = FileOffset(offset-offset_page)
+        len_page = delta + len
 
         # platform-specific internals
          @unix_only begin
             file_desc = fd(io)
-            prot, flags, iswrite = settings(file_desc)
-            iswrite && grow && grow!(len, file_desc, offset)
+            prot, flags, iswrite = Mmap`.settings(file_desc)
+            iswrite && grow && Mmap`.grow!(len, file_desc, offset)
             # mmap the file
             ptr = ccall(:jl_mmap, Ptr{Void}, (Ptr{Void}, Csize_t, Cint, Cint, Cint, FileOffset), C_NULL, len_page, prot, flags, file_desc, offset_page)
             systemerror("memory mapping failed", reinterpret(Int,ptr) == -1)
@@ -131,20 +133,32 @@ type Stream <: IO
             ptr = ccall(:MapViewOfFile, stdcall, Ptr{Void}, (Ptr{Void}, Cint, Cint, Cint, Csize_t),
                             handle, readonly ? FILE_MAP_READ : FILE_MAP_WRITE, offset_page>>32, offset_page&typemax(UInt32), szfile - convert(Csize_t, offset_page))
             ptr == C_NULL && error("could not create mapping view: $(Base.FormatMessage())")
-        end # @windows_only
-        offset = FileOffset(offset-offset_page)
-        stream = new(ptr,handle,len_page,offset,offset+1,isdefined(io,:name) ? io.name : "")
-        finalize && finalizer(stream,close)
-        return stream
+        end # @windows_only 
+        A = pointer_to_array(convert(Ptr{T}, UInt(ptr)+delta), dims)
+        array = new{T,N}(A,ptr,handle,isreadable(io),iswritable(io),len+delta)
+        finalizer(array,close)
+        return array
     end
 end
 
-Stream(file::AbstractString, len::Integer=filesize(file), offset::Integer=0; finalize::Bool=true, grow::Bool=true) =
-    open(io->Stream(io, len, offset; finalize=finalize, grow=grow), file, "r+")
-Base.show(io::IO, s::Stream) = print(io, "Mmap.Stream(", s.name, ")")
+Mmap`.Array{T,N}(::Type{T}, file::AbstractString, dims::NTuple{N,Integer}=(filesize(file),), offset::Integer=Int64(0); grow::Bool=true) =
+    open(io->Mmap`.Array(T, io, dims, offset; grow=grow), file, isfile(file) ? "r+" : "w+")
 
-function Base.close(m::Stream)
-    @unix_only systemerror("munmap", ccall(:munmap,Cint,(Ptr{Void},Int),m.ptr,m.len) != 0)
+# using default type: UInt8
+Mmap`.Array{N}(io::IO, dims::NTuple{N,Integer}=(filesize(io),), offset::Integer=position(io); grow::Bool=true) =
+    Mmap`.Array(UInt8, io, dims, offset; grow=grow)
+Mmap`.Array{N}(file::AbstractString, dims::NTuple{N,Integer}=(filesize(io),), offset::Integer=Int64(0); grow::Bool=true) =
+    open(io->Mmap`.Array(UInt8, io, dims, offset; grow=grow), file, isfile(file) ? "r+" : "w+")
+
+# using a length argument instead of dims
+Mmap`.Array(io::IO, len::Integer=filesize(io), offset::Integer=position(io); grow::Bool=true) =
+    Mmap`.Array(UInt8, io, (len,), offset; grow=grow)
+Mmap`.Array(file::AbstractString, len::Integer=filesize(file), offset::Integer=Int64(0); grow::Bool=true) =
+    open(io->Mmap`.Array(UInt8, io, (len,), offset; grow=grow), file, isfile(file) ? "r+" : "w+")
+
+function Base.close(m::Mmap`.Array)
+    m.isreadable = false; m.iswritable = false
+    @unix_only systemerror("munmap", ccall(:munmap,Cint,(Ptr{Void},Int),m.ptr,m.offset) != 0)
     @windows_only begin
         status = ccall(:UnmapViewOfFile, stdcall, Cint, (Ptr{Void},), m.ptr)!=0
         status |= ccall(:CloseHandle, stdcall, Cint, (Ptr{Void},), m.handle)!=0
@@ -153,16 +167,35 @@ function Base.close(m::Stream)
     return
 end
 
-function Base.read(from::Stream, ::Type{UInt8})
-    from.pos > from.len && throw(EOFError())
-    byte = unsafe_load(convert(Ptr{UInt8},from.ptr), from.pos)
-    from.pos += 1
-    return byte
+Base.iswritable(m::Mmap`.Array) = m.iswritable
+Base.isreadable(m::Mmap`.Array) = m.isreadable
+
+# limited Array interface
+Base.length(m::Mmap`.Array) = length(m.array)
+Base.size(m::Mmap`.Array) = size(m.array)
+
+const READERROR  = ArgumentError("mapped-memory is not readable")
+Base.getindex(S::Mmap`.Array) = isreadable(S) ? getindex(S.array) : throw(READERROR)
+Base.getindex(S::Mmap`.Array, I::Real) = isreadable(S) ? getindex(S.array, I) : throw(READERROR)
+Base.getindex(S::Mmap`.Array, I::AbstractArray) = isreadable(S) ? getindex(S.array, I) : throw(READERROR)
+@generated function Base.getindex(S::Mmap`.Array, I::Union(Real,AbstractVector)...)
+    N = length(I)
+    Isplat = Expr[:(I[$d]) for d = 1:N]
+    quote
+        isreadable(S) ? getindex(S.array, $(Isplat...)) : throw(READERROR)
+    end
 end
 
-function Base.peek(from::Stream)
-    from.pos > from.len && throw(EOFError())
-    return unsafe_load(from.ptr, from.pos)
+const WRITEERROR = ArgumentError("mapped-memory is not writable")
+Base.setindex!(S::Mmap`.Array, x) = iswritable(S) ? setindex!(S.array, x) : throw(WRITEERROR)
+Base.setindex!(S::Mmap`.Array, x, I::Real) = iswritable(S) ? setindex!(S.array, x, I) : throw(WRITEERROR)
+Base.setindex!(S::Mmap`.Array, x, I::AbstractArray) = iswritable(S) ? setindex!(S.array, x, I) : throw(WRITEERROR)
+@generated function Base.setindex!(S::Mmap`.Array, x, I::Union(Real,AbstractVector)...)
+    N = length(I)
+    Isplat = Expr[:(I[$d]) for d = 1:N]
+    quote
+        iswritable(S) ? setindex!(S.array, x, $(Isplat...)) : throw(WRITEERROR)
+    end
 end
 
 # msync flags for unix
@@ -170,51 +203,10 @@ const MS_ASYNC = 1
 const MS_INVALIDATE = 2
 const MS_SYNC = 4
 
-sync!(m::Stream, flags::Integer=MS_SYNC) = sync!(m.ptr, m.len, flags)
-sync!{T}(A::Array{T}) = sync!(pointer(A), length(A)*sizeof(T))
-sync!(B::BitArray)    = sync!(pointer(B.chunks), length(B.chunks)*sizeof(UInt64))
-function sync!(p::Ptr, len::Integer, flags::Integer=MS_SYNC)
-    @unix_only systemerror("msync", ccall(:msync, Cint, (Ptr{Void}, Csize_t, Cint), p, len, flags) != 0)
+function sync!(m::Mmap`.Array, flags::Integer=MS_SYNC)
+    @unix_only systemerror("msync", ccall(:msync, Cint, (Ptr{Void}, Csize_t, Cint), pointer(m.array), length(m), flags) != 0)
     @windows_only systemerror("could not FlushViewOfFile: $(Base.FormatMessage())",
-                    ccall(:FlushViewOfFile, stdcall, Cint, (Ptr{Void}, Csize_t), p, len) == 0)
+                    ccall(:FlushViewOfFile, stdcall, Cint, (Ptr{Void}, Csize_t), pointer(m.array), length(m)) == 0)
 end
-
-# Mmapped-array constructor
-function Array{T,N}(::Type{T}, dims::NTuple{N,Integer}, io::IO, offset=position(io); grow::Bool=true)
-    n = 1
-    for (i, d) in enumerate(dims)
-        d < 0 && throw(ArgumentError("dimension size must be ≥ 0, got $d size for dimension $i"))
-        n *= d
-    end
-    mm = Stream(io, n*sizeof(T), offset; finalize=false, grow=grow)
-    A = pointer_to_array(convert(Ptr{T}, UInt(mm.ptr)+mm.offset), dims)
-    finalizer(A, x->close(mm))
-    return A
-end
-Array{T,N}(::Type{T}, dims::NTuple{N,Integer}, file::AbstractString, offset::Integer=0; grow::Bool=true) = open(io->Array(T,dims,io,offset;grow=grow),file, "r+")
-Array(io::IO, len::Integer=filesize(io), offset::Integer=0; grow::Bool=true) = Array(UInt8, (len,), io, offset; grow=grow)
-Array(file::AbstractString, len::Integer=filesize(file), offset::Integer=0; grow::Bool=true) = open(io->Array(UInt8,(len,),io,offset;grow=grow),file, "r+")
-
-# Mmapped-bitarray constructor
-function BitArray{N}(dims::NTuple{N,Integer}, io::IO, offset::Integer=position(io); grow::Bool=true)
-    n = prod(dims)
-    nc = Base.num_bit_chunks(n)
-    chunks = Mmap.Array(UInt64, (nc,), io, offset)
-    if !isreadonly(io)
-        chunks[end] &= Base._msk_end(n)
-    else
-        if chunks[end] != chunks[end] & Base._msk_end(n)
-            throw(ArgumentError("the given file does not contain a valid BitArray of size $(join(dims, 'x')) (open with \"r+\" mode to override)"))
-        end
-    end
-    B = BitArray{N}(ntuple(N,i->0)...)
-    B.chunks = chunks
-    B.len = n
-    if N != 1
-        B.dims = dims
-    end
-    return B
-end
-BitArray{N}(dims::NTuple{N,Integer}, file::AbstractString, offset::Integer=0; grow::Bool=true) = open(io->BitArray(dims,io,offset;grow=grow),file, "r+")
 
 end # module
