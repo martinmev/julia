@@ -11,7 +11,7 @@ type SharedArray{T,N} <: DenseArray{T,N}
 
     # Fields below are not to be serialized
     # Local shmem map.
-    s::Array{T,N}
+    s::Mmap.Array{T,N}
 
     # idx of current workers pid into the pids vector, 0 if this shared array is not mapped locally.
     pidx::Int
@@ -134,7 +134,7 @@ end
 procs(S::SharedArray) = S.pids
 indexpids(S::SharedArray) = S.pidx
 
-sdata(S::SharedArray) = S.s
+sdata(S::SharedArray) = S.s.array
 sdata(A::AbstractArray) = A
 
 localindexes(S::SharedArray) = S.pidx > 0 ? range_1dim(S, S.pidx) : 1:0
@@ -204,7 +204,7 @@ function deserialize{T,N}(s, t::Type{SharedArray{T,N}})
     S
 end
 
-convert(::Type{Array}, S::SharedArray) = S.s
+convert(::Type{Array}, S::SharedArray) = S.s.array
 
 # pass through getindex and setindex! - they always work on the complete array unlike DArrays
 getindex(S::SharedArray) = getindex(S.s)

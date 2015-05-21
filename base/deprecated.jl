@@ -465,10 +465,25 @@ function msync(p::Ptr, len::Integer, flags::Integer=Mmap.MS_SYNC)
     depwarn("`msync` is deprecated, use `Mmap.sync!(::Mmap.Array)` instead")
     systemerror("msync", ccall(:msync, Cint, (Ptr{Void}, Csize_t, Cint), p, len, flags) != 0)
 end
-@deprecate mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::IO, offset::FileOffset; grow::Bool=true) Mmap.Array(T, s, dims, offset; grow=grow).array
+function mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::IO, offset::FileOffset; grow::Bool=true)
+  depwarn("`mmap_array` is deprecated, use `Mmap.Array(::Type{T}, io::IO, dims, offset)` instead")
+    prot, flags, iswrite = mmap_stream_settings(s)
+    len = prod(dims)*sizeof(T)
+    if len > typemax(Int)
+        throw(ArgumentError("file is too large to memory-map on this platform"))
+    end
+    if iswrite && grow
+        pmap, delta = mmap_grow(len, prot, flags, fd(s), offset)
+    else
+        pmap, delta = Libc.mmap(len, prot, flags, fd(s), offset)
+    end
+    A = pointer_to_array(convert(Ptr{T}, UInt(pmap)+delta), dims)
+    finalizer(A,x->Libc.munmap(pmap,len+delta))
+    return A
+end
 end
 
-@windows_only
+@windows_only begin
 function munmap(viewhandle::Ptr,mmaphandle::Ptr)
     depwarn("`munmap` is deprecated, use `close(::Mmap.Array)` instead")
     status = ccall(:UnmapViewOfFile, stdcall, Cint, (Ptr{Void},), m.viewhandle)!=0
@@ -484,10 +499,59 @@ function msync(p::Ptr, len::Integer)
         error("could not msync: $(FormatMessage())")
     end
 end
-@deprecate mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::Union(IO,SharedMemSpec), offset::FileOffset) Mmap.Array(T, s, dims, offset).array
+function mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::Union(IO,SharedMemSpec), offset::FileOffset)
+    depwarn("`mmap_array` is deprecated, use `Mmap.Array(::Type{T}, io::IO, dims, offset)` instead")
+    if isa(s,IO)
+        hdl = _get_osfhandle(RawFD(fd(s))).handle
+        if Int(hdl) == -1
+            error("could not get handle for file to map: $(FormatMessage())")
+        end
+        name = Ptr{Cwchar_t}(C_NULL)
+        ro = isreadonly(s)
+        create = true
+    else
+        # shared memory
+        hdl = -1
+        name = utf16(s.name)
+        ro = s.readonly
+        create = s.create
+    end
+    len = prod(dims)*sizeof(T)
+    const granularity::Int = ccall(:jl_getallocationgranularity, Clong, ())
+    if len < 0
+        throw(ArgumentError("requested size must be ≥ 0, got $len"))
+    end
+    if len > typemax(Int)-granularity
+        throw(ArgumentError("file is too large ot memory-map on this platform"))
+    end
+    # Set the offset to a page boundary
+    offset_page::FileOffset = div(offset, granularity)*granularity
+    szfile = convert(Csize_t, len + offset)
+    szarray = szfile - convert(Csize_t, offset_page)
+    access = ro ? 4 : 2
+    if create
+        flprotect = ro ? 0x02 : 0x04
+        mmaphandle = ccall(:CreateFileMappingW, stdcall, Ptr{Void}, (Cptrdiff_t, Ptr{Void}, Cint, Cint, Cint, Cwstring),
+            hdl, C_NULL, flprotect, szfile>>32, szfile&typemax(UInt32), name)
+    else
+        mmaphandle = ccall(:OpenFileMappingW, stdcall, Ptr{Void}, (Cint, Cint, Cwstring),
+            access, true, name)
+    end
+    if mmaphandle == C_NULL
+        error("could not create file mapping: $(FormatMessage())")
+    end
+    viewhandle = ccall(:MapViewOfFile, stdcall, Ptr{Void}, (Ptr{Void}, Cint, Cint, Cint, Csize_t),
+        mmaphandle, access, offset_page>>32, offset_page&typemax(UInt32), szarray)
+    if viewhandle == C_NULL
+        error("could not create mapping view: $(FormatMessage())")
+    end
+    A = pointer_to_array(convert(Ptr{T}, viewhandle+offset-offset_page), dims)
+    finalizer(A, x->Libc.munmap(viewhandle, mmaphandle))
+    return A
+end
 end
 
-function mmap_bitarray{N}(dims::NTuple{N,Integer}, s::IOArray, offset::FileOffset)
+function mmap_bitarray{N}(dims::NTuple{N,Integer}, s::IO, offset::FileOffset)
     depwarn("`mmap_bitarray` is discontinued")
     iswrite = !isreadonly(s)
     n = 1
@@ -517,4 +581,4 @@ function mmap_bitarray{N}(dims::NTuple{N,Integer}, s::IOArray, offset::FileOffse
     end
     return B
 end
-mmap_bitarray{N}(::Type{Bool}, dims::NTuple{N,Integer}, s::IOArray, offset::FileOffset=position(s)) = mmap_bitarray(dims, s, offset)
+mmap_bitarray{N}(::Type{Bool}, dims::NTuple{N,Integer}, s::IO, offset::FileOffset=position(s)) = mmap_bitarray(dims, s, offset)
