@@ -387,7 +387,7 @@ function _shm_mmap_array(T, dims, shm_seg_name, mode)
         systemerror("ftruncate() failed for shm segment " * shm_seg_name, rc != 0)
     end
 
-    Mmap.Array(T, dims, s, 0; grow=false)
+    Mmap.Array(T, s, dims, 0; grow=false)
 end
 
 shm_unlink(shm_seg_name) = ccall(:shm_unlink, Cint, (Cstring,), shm_seg_name)
@@ -400,8 +400,8 @@ end # @unix_only
 function _shm_mmap_array(T, dims, shm_seg_name, mode)
     readonly = !((mode & JL_O_RDWR) == JL_O_RDWR)
     create = (mode & JL_O_CREAT) == JL_O_CREAT
-    s = Mmap.SharedMemSpec(shm_seg_name, readonly, create)
-    Mmap.Array(T, dims, s, 0)
+    s = Mmap.AnonymousMmap(shm_seg_name, readonly, create)
+    Mmap.Array(T, s, dims, 0)
 end
 
 # no-op in windows

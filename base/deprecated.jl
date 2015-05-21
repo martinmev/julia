@@ -443,7 +443,7 @@ export float32_isvalid, float64_isvalid
 
 @unix_only begin
 function mmap(len::Integer, prot::Integer, flags::Integer, fd, offset::Integer)
-    depwarn("`mmap` is deprecated, use `Mmap.Stream` instead")
+    depwarn("`mmap` is deprecated, use `Mmap.Array` instead")
     pagesize::Int = ccall(:jl_getpagesize, Clong, ())
     len < 0 && throw(ArgumentError("requested size must be ≥ 0, got $len"))
     len > typemax(Int)-pagesize && throw(ArgumentError("requested size must be ≤ $(typemax(Int)-pagesize), got $len"))
@@ -454,21 +454,64 @@ function mmap(len::Integer, prot::Integer, flags::Integer, fd, offset::Integer)
     return p, Int(offset-offset_page)
 end
 function munmap(p::Ptr,len::Integer)
-    depwarn("`munmap` is deprecated, use `close(::Mmap.Stream)` instead")
+    depwarn("`munmap` is deprecated, use `close(::Mmap.Array)` instead")
     systemerror("munmap", ccall(:munmap,Cint,(Ptr{Void},Int),m.viewhandle,m.len) != 0)
 end
 
+function msync(p::Ptr, len::Integer, flags::Integer=Mmap.MS_SYNC)
+    depwarn("`msync` is deprecated, use `Mmap.sync!(::Mmap.Array)` instead")
+    systemerror("msync", ccall(:msync, Cint, (Ptr{Void}, Csize_t, Cint), p, len, flags) != 0)
 end
-@windows_only function munmap(viewhandle::Ptr,mmaphandle::Ptr)
-    depwarn("`munmap` is deprecated, use `close(::Mmap.Stream)` instead")
+@deprecate mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::IO, offset::FileOffset; grow::Bool=true) Mmap.Array(T, s, dims, offset; grow=grow).array
+end
+
+@windows_only
+function munmap(viewhandle::Ptr,mmaphandle::Ptr)
+    depwarn("`munmap` is deprecated, use `close(::Mmap.Array)` instead")
     status = ccall(:UnmapViewOfFile, stdcall, Cint, (Ptr{Void},), m.viewhandle)!=0
     status |= ccall(:CloseHandle, stdcall, Cint, (Ptr{Void},), m.mmaphandle)!=0
     if !status
         error("could not unmap view: $(FormatMessage())")
     end
 end
+function msync(p::Ptr, len::Integer)
+    depwarn("`msync` is deprecated, use `Mmap.sync!(::Mmap.Array)` instead")
+    status = ccall(:FlushViewOfFile, stdcall, Cint, (Ptr{Void}, Csize_t), p, len)!=0
+    if !status
+        error("could not msync: $(FormatMessage())")
+    end
+end
+@deprecate mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::Union(IO,SharedMemSpec), offset::FileOffset) Mmap.Array(T, s, dims, offset).array
+end
 
-@deprecate msync Mmap.sync!
-@deprecate mmap_array Mmap.Array
-@deprecate mmap_bitarray Mmap.BitArray
-@deprecate mmap_bitarray{N}(::Type{Bool}, dims::NTuple{N,Integer}, s::IOStream, offset::FileOffset=position(s)) Mmap.BitArray(dims, s, offset)
+function mmap_bitarray{N}(dims::NTuple{N,Integer}, s::IOArray, offset::FileOffset)
+    depwarn("`mmap_bitarray` is discontinued")
+    iswrite = !isreadonly(s)
+    n = 1
+    for (i, d) in enumerate(dims)
+        if d < 0
+            throw(ArgumentError("dimension size must be ≥ 0, got $d size for dimension $i"))
+        end
+        n *= d
+    end
+    nc = num_bit_chunks(n)
+    if nc > typemax(Int)
+        throw(ArgumentError("file is too large to memory-map on this platform"))
+    end
+    chunks = mmap_array(UInt64, (nc,), s, offset)
+    if iswrite
+        chunks[end] &= _msk_end(n)
+    else
+        if chunks[end] != chunks[end] & _msk_end(n)
+            throw(ArgumentError("the given file does not contain a valid BitArray of size $(join(dims, 'x')) (open with \"r+\" mode to override)"))
+        end
+    end
+    B = BitArray{N}(ntuple(N,i->0)...)
+    B.chunks = chunks
+    B.len = n
+    if N != 1
+        B.dims = dims
+    end
+    return B
+end
+mmap_bitarray{N}(::Type{Bool}, dims::NTuple{N,Integer}, s::IOArray, offset::FileOffset=position(s)) = mmap_bitarray(dims, s, offset)
