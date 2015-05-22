@@ -499,6 +499,11 @@ function msync(p::Ptr, len::Integer)
         error("could not msync: $(FormatMessage())")
     end
 end
+type SharedMemSpec
+    name :: AbstractString
+    readonly :: Bool
+    create :: Bool
+end
 function mmap_array{T,N}(::Type{T}, dims::NTuple{N,Integer}, s::Union(IO,SharedMemSpec), offset::FileOffset)
     depwarn("`mmap_array` is deprecated, use `Mmap.Array(::Type{T}, io::IO, dims, offset)` instead")
     if isa(s,IO)

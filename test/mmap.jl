@@ -13,6 +13,7 @@ t = "Hello World".data
 m = Mmap.Array(UInt8, file, (1,2,1))
 @test m.array == reshape("He".data,(1,2,1))
 close(m)
+gc()
 
 s = open(f->f,file,"w")
 @test_throws ArgumentError Mmap.Array(file) # requested len=0 on empty file
@@ -37,7 +38,7 @@ close(s)
 for i = 0x01:0x0c
     @test length(Mmap.Array(file, i)) == Int(i)
 end
-gc(); gc()
+gc()
 
 sz = filesize(file)
 m = Mmap.Array(file, sz+1)
@@ -84,6 +85,7 @@ close(m)
 close(c)
 close(d)
 @test_throws ArgumentError m[1] # try to read from an mmapped-array that has been unmapped
+gc()
 
 s = open(file, "w") do f
     write(f, "Hello World\n")
@@ -124,7 +126,7 @@ close(c)
 c = Mmap.Array(file, 5, 6)
 @test c.array == "World".data
 close(c)
-
+gc()
 s = open(file, "w")
 write(s, "Hello World\n")
 close(s)
