@@ -251,28 +251,60 @@ end
 function gen_comp(T, body, iter0, isdict::Bool)
     niter = length(iter0)
     sz = Array(Any,niter) # dim tuple
+    sz0 = Array(Any,niter) # dim tuple if an input is empty
     iterblock = Array(Any,niter) # canonicalized iteration spec
-    values = Array(Any,niter) # assignment for iterables to avoid repeating
+    preheader = :() # assignment for iterables to avoid repeating
+    preheader_colon = :()
+    isempty = :(false)
+    itst = Array(Any,niter) # names for iterator states
     ncolon = 0
-    for i = 1:length(iter0)
+
+    for i=1:niter # precompute this, we don't have push!
+        ncolon += (iter0[i] === :(:))
+    end
+
+    colons = Array(Any,ncolon)
+    iscolon = Array(Any,niter)
+    needs_firsteval = T === nothing # do we need to unroll the 1st iteration
+    needs_fallback = T === nothing # do we need to check types
+    icol = 1
+    for i = 1:niter
         it = iter0[i]
+        iscol = false
         if it === :(:)
-            sz[i] = :(1)
-            ncolon += 1
-            continue
+            colonname = gensym()
+            colons[icol] = colonname
+            it = :($colonname = 1:size(v0,$icol))
+            icol += 1
+            iscol = true
+            needs_firsteval = true
         end
+        iscolon[i] = iscol
         # generate anonymous name for unused iterators
         if !isa(it,Expr) || it.head !== :(=)
             it = :($(gensym()) = $it)
         end
 
         name = gensym()
-        values[i-ncolon] = :($name = $(esc(it.args[2])))
-        iterblock[i-ncolon] = :($(esc(it.args[1])) = $name)
+        itst[i] = gensym()
         sz[i] = :(length($name))
+        itname = it.args[2]
+        if iscol
+            preheader_colon = quote
+                $preheader_colon
+                $name = $itname
+                $(itst[i]) = start($name)
+                $(it.args[1]), $(itst[i]) = next($name, $(itst[i]))
+            end
+            sz0[i] = :(0)
+            iterblock[i] = :($(it.args[1]) = $name)
+        else
+            sz0[i] = :(length($name))
+            preheader = :($preheader; $name = $(esc(itname)))
+            isempty = :($isempty | (length($name) == 0))
+            iterblock[i] = :($(esc(it.args[1])) = $name)
+        end
     end
-
-    itst = map(t -> gensym(), iterblock) # iteration state var
 
     if isdict
         key = body.args[1]
@@ -283,12 +315,7 @@ function gen_comp(T, body, iter0, isdict::Bool)
         end
     end
 
-
     #isempty = foldl((x,i) -> :($x | ($i == 0)), :(false), sz)
-    isempty = :(false)
-    for i in sz
-        isempty = :($isempty | ($i == 0))
-    end
 
     loopexpr = if isdict
         quote
@@ -296,17 +323,22 @@ function gen_comp(T, body, iter0, isdict::Bool)
             v = $(esc(body))
         end
     else
-        :(v = $(esc(body)))
+        if ncolon > 0
+            :(v = $(Expr(:call, TopNode(:getindex), esc(body), colons...)))
+        else
+            :(v = $(esc(body)))
+        end
     end
-    if T === nothing
-        len = niter - ncolon
-        first_it = Array(Any,len)
-        for i = len:-1:1
+    if needs_firsteval
+        first_it = :()
+        for i = niter:-1:1
+            iscolon[i] && continue
             it = iterblock[i]
             itname = it.args[2]
-            first_it[i] = quote
-                  $(itst[i]) = start($itname)
-                  $(it.args[1]), $(itst[i]) = next($itname, $(itst[i]))
+            first_it = quote
+                $first_it
+                $(itst[i]) = start($itname)
+                $(it.args[1]), $(itst[i]) = next($itname, $(itst[i]))
             end
         end
         init = if isdict
@@ -318,14 +350,30 @@ function gen_comp(T, body, iter0, isdict::Bool)
                 result = Dict{KT,T}()
             end
         else
+            colon_eval = if ncolon > 0
+                quote
+                    $preheader_colon
+                    v = $(Expr(:call, TopNode(:getindex), esc(body), colons...))
+                end
+            else
+                :(v = v0)
+            end
             quote
                 index = 1
-                v = $(esc(body))
-                T = typeof(v)
-                result = Array(T, $(sz...))
+                v0 = $(esc(body))
+                $colon_eval
+                $(if needs_fallback
+                  quote
+                  T = typeof(v)
+                  result = Array(T, $(sz...))
+                  end
+                  else
+                  :(result = Array($(esc(T)), $(sz...)))
+                  end)
             end
         end
-        fallback = if isdict
+        fallback =
+        if isdict
             quote
                 S = typeof(v)
                 KS = typeof(index)
@@ -348,13 +396,13 @@ function gen_comp(T, body, iter0, isdict::Bool)
         end
 
         header = quote
-            $(first_it...)
+            $first_it
             $init
             @goto inner_loop
         end
         loopexpr = quote
             $loopexpr
-            $fallback
+            $(needs_fallback ? fallback : :())
             @label inner_loop
         end
     else
@@ -376,8 +424,7 @@ function gen_comp(T, body, iter0, isdict::Bool)
     if !isdict
         loopexpr = :($loopexpr; index += 1)
     end
-    len = niter - ncolon
-    for i = 1:len
+    for i = 1:niter
         it = iterblock[i]
         itname = it.args[2]
         loopexpr = quote
@@ -389,12 +436,12 @@ function gen_comp(T, body, iter0, isdict::Bool)
                    end))
         end
     end
-    q = if T === nothing
+    q = if needs_firsteval
         quote
             let
-                $(values...)
+                $preheader
                 if $isempty
-                    $(isdict ? :(Dict{Union(),Union()}()) : :(Array(Union(), 0)))
+                    $(isdict ? :(Dict{Union(),Union()}()) : :(Array(Union(), $(sz0...))))
                 else
                     $header
                     $loopexpr
@@ -404,7 +451,7 @@ function gen_comp(T, body, iter0, isdict::Bool)
         end
     else
         quote
-            $(values...)
+            $preheader
             $header
             $loopexpr
             result
