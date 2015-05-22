@@ -2044,81 +2044,7 @@
                  (error "ccall argument types must be a tuple; try \"(T,)\"")))
              (expand-forms
               (lower-ccall name RT (cdr argtypes) args))))
-         e))
-
-   'dict_comprehension
-   (lambda (e)
-     (expand-forms (lower-dict-comprehension (cadr e) (cddr e))))
-
-   'typed_dict_comprehension
-   (lambda (e)
-     (expand-forms (lower-typed-dict-comprehension (cadr e) (caddr e) (cdddr e))))))
-
-(define (lower-dict-comprehension expr ranges)
-  (let ((result   (make-jlgensym))
-        (initlabl (make-jlgensym))
-        (onekey   (make-jlgensym))
-        (oneval   (make-jlgensym))
-        (rv         (map (lambda (x) (make-jlgensym)) ranges)))
-
-    ;; construct loops to cycle over all dimensions of an n-d comprehension
-    (define (construct-loops ranges)
-      (if (null? ranges)
-          `(block (= ,onekey ,(cadr expr))
-                  (= ,oneval ,(caddr expr))
-                  (type_goto ,initlabl ,onekey ,oneval)
-                  (call (top setindex!) ,result ,oneval ,onekey))
-          `(for ,(car ranges)
-                (block
-                 ;; *** either this or force all for loop vars local
-                 ,.(map (lambda (r) `(local ,r))
-                        (lhs-vars (cadr (car ranges))))
-                 ,(construct-loops (cdr ranges))))))
-
-    ;; Evaluate the comprehension
-    (let ((loopranges
-           (map (lambda (r v) `(= ,(cadr r) ,v)) ranges rv)))
-      `(block
-        ,.(map (lambda (v r) `(= ,v ,(caddr r))) rv ranges)
-        (scope-block
-         (block
-          #;,@(map (lambda (r) `(local ,r))
-          (apply append (map (lambda (r) (lhs-vars (cadr r))) ranges)))
-          (label ,initlabl)
-          (= ,result (call (curly (top Dict)
-                                  (static_typeof ,onekey)
-                                  (static_typeof ,oneval))))
-          ,(construct-loops (reverse loopranges))
-          ,result))))))
-
-(define (lower-typed-dict-comprehension atypes expr ranges)
-  (if (not (and (length= atypes 3)
-                (eq? (car atypes) '=>)))
-      (error "invalid \"typed_dict_comprehension\" syntax")
-      (let ( (result (make-jlgensym))
-             (rs (map (lambda (x) (make-jlgensym)) ranges)) )
-
-        ;; construct loops to cycle over all dimensions of an n-d comprehension
-        (define (construct-loops ranges rs)
-          (if (null? ranges)
-              `(call (top setindex!) ,result ,(caddr expr) ,(cadr expr))
-              `(for (= ,(cadr (car ranges)) ,(car rs))
-                    (block
-                     ;; *** either this or force all for loop vars local
-                     ,.(map (lambda (r) `(local ,r))
-                            (lhs-vars (cadr (car ranges))))
-                     ,(construct-loops (cdr ranges) (cdr rs))))))
-
-        ;; Evaluate the comprehension
-        `(block
-          ,.(map make-assignment rs (map caddr ranges))
-          (= ,result (call (curly (top Dict) ,(cadr atypes) ,(caddr atypes))))
-          (scope-block
-           (block
-            #;,@(map (lambda (r) `(local ,r))
-            (apply append (map (lambda (r) (lhs-vars (cadr r))) ranges)))
-            ,(construct-loops (reverse ranges) (reverse rs))
-            ,result))))))
+         e))))
 
 (define (lhs-vars e)
   (cond ((symbol? e) (list e))
@@ -3081,12 +3007,6 @@ So far only the second case can actually occur.
                                   (let ((l (make-label)))
                                     (put! label-map (cadr e) l)
                                     (emit `(goto ,l))))))
-            ((type_goto) (let((m (get label-map (cadr e) #f)))
-                           (if m
-                               (emit `(type_goto ,m ,@(cddr e)))
-                               (let ((l (make-label)))
-                                 (put! label-map (cadr e) l)
-                                 (emit `(type_goto ,l ,@(cddr e)))))))
             ;; exception handlers are lowered using
             ;; (enter L) - push handler with catch block at label L
             ;; (leave n) - pop N exception handlers

@@ -301,7 +301,7 @@ function gen_comp(T, body, iter, isdict::Bool)
                 KT = typeof(index)
                 T = typeof(v)
                 result = Dict{KT,T}()
-            end            
+            end
         else
             quote
                 index = 1
@@ -331,7 +331,7 @@ function gen_comp(T, body, iter, isdict::Bool)
                 end
             end
         end
-        
+
         header = quote
             $(first_it...)
             $init
