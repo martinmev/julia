@@ -248,17 +248,32 @@ function vect{T}(args::T...)
     A
 end
 
-function gen_comp(T, body, iter, isdict::Bool)
-    values = map(iter) do i
-        :($(gensym()) = $(esc(i.args[2])))
-    end
-    iterblock = map(values, iter) do v, i
-        :($(esc(i.args[1])) = $(v.args[1]))
+function gen_comp(T, body, iter0, isdict::Bool)
+    niter = length(iter0)
+    sz = Array(Any,niter) # dim tuple
+    iterblock = Array(Any,niter) # canonicalized iteration spec
+    values = Array(Any,niter) # assignment for iterables to avoid repeating
+    ncolon = 0
+    for i = 1:length(iter0)
+        it = iter0[i]
+        if it === :(:)
+            sz[i] = :(1)
+            ncolon += 1
+            continue
+        end
+        # generate anonymous name for unused iterators
+        if !isa(it,Expr) || it.head !== :(=)
+            it = :($(gensym()) = $it)
+        end
+
+        name = gensym()
+        values[i-ncolon] = :($name = $(esc(it.args[2])))
+        iterblock[i-ncolon] = :($(esc(it.args[1])) = $name)
+        sz[i] = :(length($name))
     end
 
-    itst = map(t -> gensym(), iter)
-    sz = map(t -> :(length($(t.args[1]))), values)
-    key = nothing
+    itst = map(t -> gensym(), iterblock) # iteration state var
+
     if isdict
         key = body.args[1]
         body = body.args[2]
@@ -284,7 +299,7 @@ function gen_comp(T, body, iter, isdict::Bool)
         :(v = $(esc(body)))
     end
     if T === nothing
-        len = length(iterblock)
+        len = niter - ncolon
         first_it = Array(Any,len)
         for i = len:-1:1
             it = iterblock[i]
@@ -361,7 +376,7 @@ function gen_comp(T, body, iter, isdict::Bool)
     if !isdict
         loopexpr = :($loopexpr; index += 1)
     end
-    len = length(iterblock)
+    len = niter - ncolon
     for i = 1:len
         it = iterblock[i]
         itname = it.args[2]
