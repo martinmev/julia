@@ -315,15 +315,15 @@ function getindex(A::Array, I::UnitRange{Int})
     return X
 end
 
-function getindex{T<:Real}(A::Array, I::AbstractVector{T})
-    return [ A[i] for i in to_index(I) ]
+function getindex{T<:Real,R}(A::Array{R}, I::AbstractVector{T})
+    return R[ A[i] for i in to_index(I) ]
 end
-function getindex{T<:Real}(A::Range, I::AbstractVector{T})
-    return [ A[i] for i in to_index(I) ]
+function getindex{T<:Real,R}(A::Range{R}, I::AbstractVector{T})
+    return R[ A[i] for i in to_index(I) ]
 end
-function getindex(A::Range, I::AbstractVector{Bool})
+function getindex{R}(A::Range{R}, I::AbstractVector{Bool})
     checkbounds(A, I)
-    return [ A[i] for i in to_index(I) ]
+    return R[ A[i] for i in to_index(I) ]
 end
 
 
