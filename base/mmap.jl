@@ -104,7 +104,7 @@ type Array{T,N} <: AbstractArray{T,N}
 
         len = prod(dims) * sizeof(T)
         len > 0 || throw(ArgumentError("requested size must be > 0, got $len"))
-        len < typemax(Int)-PAGESIZE || throw(ArgumentError("requested size must be < $(typemax(Int)-PAGESIZE), got $len"))
+        len < typemax(Int) - PAGESIZE || throw(ArgumentError("requested size must be < $(typemax(Int)-PAGESIZE), got $len"))
 
         offset >= 0 || throw(ArgumentError("requested offset must be ≥ 0, got $offset"))
 
@@ -116,7 +116,7 @@ type Array{T,N} <: AbstractArray{T,N}
         file_desc = gethandle(io)
         # platform-specific mmapping
          @unix_only begin
-            prot, flags, iswrite = Mmap.settings(file_desc,shared)
+            prot, flags, iswrite = Mmap.settings(file_desc, shared)
             iswrite && grow && Mmap.grow!(io, offset, len)
             # mmap the file
             ptr = ccall(:jl_mmap, Ptr{Void}, (Ptr{Void}, Csize_t, Cint, Cint, Cint, FileOffset), C_NULL, mmaplen, prot, flags, file_desc, offset_page)
@@ -138,8 +138,8 @@ type Array{T,N} <: AbstractArray{T,N}
             ptr == C_NULL && error("could not create mapping view: $(Base.FormatMessage())")
         end # @windows_only
         # convert mmapped region to Julia Array at `ptr + (offset - offset_page)` since file was mapped at offset_page
-        A = pointer_to_array(convert(Ptr{T}, UInt(ptr) + (offset - offset_page)), dims)
-        array = new{T,N}(A,ptr,handle,isreadable(io),iswritable(io),mmaplen)
+        A = pointer_to_array(convert(Ptr{T}, UInt(ptr) + UInt(offset - offset_page)), dims)
+        array = new{T,N}(A, ptr, handle, isreadable(io), iswritable(io), Int(mmaplen))
         finalizer(array,close)
         return array
     end
@@ -161,7 +161,7 @@ Mmap.Array(file::AbstractString, len::Integer=filesize(file), offset::Integer=In
     open(io->Mmap.Array(UInt8, io, (len,), offset; grow=grow, shared=shared), file, isfile(file) ? "r+" : "w+")
 
 # constructors for non-file-backed (anonymous) mmaps
-Mmap.Array{T,N}(::Type{T}, dims::NTuple{N,Integer}; shared::Bool=true) = Mmap.Array(T, AnonymousMmap(), dims, 0; shared=shared)
+Mmap.Array{T,N}(::Type{T}, dims::NTuple{N,Integer}; shared::Bool=true) = Mmap.Array(T, AnonymousMmap(), dims, Int64(0); shared=shared)
 Mmap.Array{T}(::Type{T}, d::Integer...; shared::Bool=true) = Mmap.Array(T,convert(Tuple{Vararg{Int}}, d); shared=shared)
 
 function Base.close(m::Mmap.Array)
