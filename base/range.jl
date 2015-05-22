@@ -314,7 +314,8 @@ maximum(r::UnitRange) = isempty(r) ? throw(ArgumentError("range must be non-empt
 minimum(r::Range)  = isempty(r) ? throw(ArgumentError("range must be non-empty")) : min(first(r), last(r))
 maximum(r::Range)  = isempty(r) ? throw(ArgumentError("range must be non-empty")) : max(first(r), last(r))
 
-ctranspose(r::Range) = [x for _=1, x=r]
+
+#ctranspose(r::Range) = [x for _=1, x=r]
 transpose(r::Range) = r'
 
 # Ranges are immutable
@@ -597,7 +598,7 @@ convert{T}(::Type{FloatRange}, r::OrdinalRange{T}) =
 
 ## non-linear operations on ranges and fallbacks for non-real numbers ##
 
-.+(x::Number, r::Range) = [ x+y for y=r ]
+#=.+(x::Number, r::Range) = [ x+y for y=r ]
 .+(r::Range, y::Number) = [ x+y for x=r ]
 
 .-(x::Number, r::Range) = [ x-y for y=r ]
@@ -610,7 +611,7 @@ convert{T}(::Type{FloatRange}, r::OrdinalRange{T}) =
 ./(r::Range, y::Number) = [ x/y for x=r ]
 
 .^(x::Number, r::Range) = [ x^y for y=r ]
-.^(r::Range, y::Number) = [ x^y for x=r ]
+.^(r::Range, y::Number) = [ x^y for x=r ]=#
 
 ## concatenation ##
 

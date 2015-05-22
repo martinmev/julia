@@ -306,7 +306,7 @@ to_index{T<:Integer}(r::UnitRange{T}) = to_index(first(r)):to_index(last(r))
 to_index{T<:Integer}(r::StepRange{T}) = to_index(first(r)):to_index(step(r)):to_index(last(r))
 to_index(I::AbstractArray{Bool}) = find(I)
 to_index(A::AbstractArray{Int}) = A
-to_index{T<:Integer}(A::AbstractArray{T}) = [to_index(x) for x in A]
+#to_index{T<:Integer}(A::AbstractArray{T}) = [to_index(x) for x in A]
 to_index(i1, i2)         = to_index(i1), to_index(i2)
 to_index(i1, i2, i3)     = to_index(i1), to_index(i2), to_index(i3)
 to_index(i1, i2, i3, i4) = to_index(i1), to_index(i2), to_index(i3), to_index(i4)
@@ -381,7 +381,7 @@ end
 
 # vectorized ifelse
 
-function ifelse(c::AbstractArray{Bool}, x, y)
+#=function ifelse(c::AbstractArray{Bool}, x, y)
     reshape([ifelse(ci, x, y) for ci in c], size(c))
 end
 
@@ -399,7 +399,7 @@ function ifelse(c::AbstractArray{Bool}, x, y::AbstractArray)
     shp = promote_shape(size(c), size(y))
     reshape([ifelse(c[i], x, y[i]) for i = 1 : length(c)], shp)
 end
-
+=#
 # Pair
 
 immutable Pair{A,B}

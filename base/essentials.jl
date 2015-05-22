@@ -135,7 +135,13 @@ function length_checked_equal(args...)
     n
 end
 
-map(f::Function, a::Array{Any,1}) = Any[ f(a[i]) for i=1:length(a) ]
+function map(f::Function, a::Array{Any,1})
+    A = Array(Any,length(a))
+    for i=1:length(a)
+        A[i] = f(a[i])
+    end
+    A
+end
 
 function precompile(f::ANY, args::Tuple)
     if isa(f,DataType)
@@ -212,11 +218,135 @@ function ==(v1::SimpleVector, v2::SimpleVector)
     return true
 end
 
-map(f, v::SimpleVector) = Any[ f(v[i]) for i = 1:length(v) ]
+function map(f, v::SimpleVector)
+    A = Array(Any,length(v))
+    for i=1:length(v)
+        A[i] = f(v[i])
+    end
+    A
+end
 
-getindex(v::SimpleVector, I::AbstractArray) = svec(Any[ v[i] for i in I ]...)
+getindex(v::SimpleVector, I::AbstractArray) = svec(map(i->v[i],I)...)
 
 # index colon
 type Colon
 end
 const (:) = Colon()
+
+
+start(A::Array) = 1
+next(a::Array,i) = (a[i],i+1)
+done(a::Array,i) = (i > length(a))
+length(a::Array) = arraylen(a)
+gensym() = ccall(:jl_gensym, Any, ())::Symbol
+getindex(A::Array, i0::Int) = arrayref(A,i0)
+function vect{T}(args::T...)
+    A = Array(T, length(args))
+    for i=1:length(A)
+        A[i] = args[i]
+    end
+    A
+end
+
+function gen_comp(T, body, iter)
+    values = map(iter) do i
+        :($(gensym()) = $(esc(i.args[2])))
+    end
+    iterblock = map(values, iter) do v, i
+        :($(esc(i.args[1])) = $(v.args[1]))
+    end
+
+    index = gensym()
+    itst = map(t -> gensym(), iter)
+    sz = map(t -> :(length($(t.args[1]))), values)
+
+    #isempty = foldl((x,i) -> :($x | ($i == 0)), :(false), sz)
+    isempty = :(false)
+    for i in sz
+        isempty = :($isempty | ($i == 0))
+    end
+
+    header = nothing
+    if T === nothing
+        len = length(iterblock)
+        first_it = Array(Any,len)
+        for i = len:-1:1
+            it = iterblock[i]
+            itname = it.args[2]
+            first_it[i] = quote
+                  $(itst[i]) = start($itname)
+                  $(it.args[1]), $(itst[i]) = next($itname, $(itst[i]))
+            end
+        end
+        header = quote
+            $(first_it...)
+            $index = 1
+            v = $(esc(body))
+            T = typeof(v)
+            result = Array(T, $(sz...))
+            @goto inner_loop
+        end
+        loopexpr = quote
+            v = $(esc(body))
+            S = typeof(v)
+            if !(S <: T)
+                T = typejoin(S,T)
+                result_next = similar(result,T)
+                copy!(result_next, 1, result, 1, $index-1)
+                result = result_next
+            end
+            @label inner_loop
+        end
+    else
+        loopexpr = :(v = $(esc(body)))
+    end
+    loopexpr = quote
+        $loopexpr
+        result[$index] = v
+        $index += 1
+    end
+    len = length(iterblock)
+    for i = 1:len
+        it = iterblock[i]
+        itname = it.args[2]
+        loopexpr = quote
+            $(itst[i]) = start($itname)
+            $(Expr(:while, :(!done($itname, $(itst[i]))),
+                   quote
+                        $(it.args[1]), $(itst[i]) = next($itname, $(itst[i]))
+                        $loopexpr
+                   end))
+        end
+    end
+    q = if T === nothing
+        quote
+            let
+                $(values...)
+                if $isempty
+                    Array(Union(), 0)
+                else
+                    $header
+                    $loopexpr
+                    result
+                end
+            end
+        end
+    else
+        quote
+            $(values...)
+            result = Array($(esc(T)), $(sz...))
+            $index = 1
+            $loopexpr
+            result
+        end
+    end
+    q
+end
+
+macro comprehension(body, iter...)
+    gen_comp(nothing,body,iter)
+end
+
+macro typed_comprehension(T, body, iter...)
+    gen_comp(T,body,iter)
+end
