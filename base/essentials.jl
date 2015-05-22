@@ -248,7 +248,7 @@ function vect{T}(args::T...)
     A
 end
 
-function gen_comp(T, body, iter)
+function gen_comp(T, body, iter, isdict::Bool)
     values = map(iter) do i
         :($(gensym()) = $(esc(i.args[2])))
     end
@@ -256,9 +256,18 @@ function gen_comp(T, body, iter)
         :($(esc(i.args[1])) = $(v.args[1]))
     end
 
-    index = gensym()
     itst = map(t -> gensym(), iter)
     sz = map(t -> :(length($(t.args[1]))), values)
+    key = nothing
+    if isdict
+        key = body.args[1]
+        body = body.args[2]
+        if T !== nothing
+            KT = T.args[1]
+            T = T.args[2]
+        end
+    end
+
 
     #isempty = foldl((x,i) -> :($x | ($i == 0)), :(false), sz)
     isempty = :(false)
@@ -266,7 +275,14 @@ function gen_comp(T, body, iter)
         isempty = :($isempty | ($i == 0))
     end
 
-    header = nothing
+    loopexpr = if isdict
+        quote
+            index = $(esc(key))
+            v = $(esc(body))
+        end
+    else
+        :(v = $(esc(body)))
+    end
     if T === nothing
         len = length(iterblock)
         first_it = Array(Any,len)
@@ -278,32 +294,72 @@ function gen_comp(T, body, iter)
                   $(it.args[1]), $(itst[i]) = next($itname, $(itst[i]))
             end
         end
+        init = if isdict
+            quote
+                index = $(esc(key))
+                v = $(esc(body))
+                KT = typeof(index)
+                T = typeof(v)
+                result = Dict{KT,T}()
+            end            
+        else
+            quote
+                index = 1
+                v = $(esc(body))
+                T = typeof(v)
+                result = Array(T, $(sz...))
+            end
+        end
+        fallback = if isdict
+            quote
+                S = typeof(v)
+                KS = typeof(index)
+                if !(S <: T && KS <: KT)
+                    T = typejoin(S,T)
+                    KT = typejoin(KS,KT)
+                    result = convert(Dict{KT,T}, result)
+                end
+            end
+        else
+            quote
+                S = typeof(v)
+                if !(S <: T)
+                    T = typejoin(S,T)
+                    result_next = similar(result,T)
+                    copy!(result_next, 1, result, 1, index-1)
+                    result = result_next
+                end
+            end
+        end
+        
         header = quote
             $(first_it...)
-            $index = 1
-            v = $(esc(body))
-            T = typeof(v)
-            result = Array(T, $(sz...))
+            $init
             @goto inner_loop
         end
         loopexpr = quote
-            v = $(esc(body))
-            S = typeof(v)
-            if !(S <: T)
-                T = typejoin(S,T)
-                result_next = similar(result,T)
-                copy!(result_next, 1, result, 1, $index-1)
-                result = result_next
-            end
+            $loopexpr
+            $fallback
             @label inner_loop
         end
     else
-        loopexpr = :(v = $(esc(body)))
+        header = if isdict
+            quote
+                result = Dict{$(esc(KT)),$(esc(T))}()
+            end
+        else
+            quote
+                index = 1
+                result = Array($(esc(T)), $(sz...))
+            end
+        end
     end
     loopexpr = quote
         $loopexpr
-        result[$index] = v
-        $index += 1
+        result[index] = v
+    end
+    if !isdict
+        loopexpr = :($loopexpr; index += 1)
     end
     len = length(iterblock)
     for i = 1:len
@@ -323,7 +379,7 @@ function gen_comp(T, body, iter)
             let
                 $(values...)
                 if $isempty
-                    Array(Union(), 0)
+                    $(isdict ? :(Dict{Union(),Union()}()) : :(Array(Union(), 0)))
                 else
                     $header
                     $loopexpr
@@ -334,8 +390,7 @@ function gen_comp(T, body, iter)
     else
         quote
             $(values...)
-            result = Array($(esc(T)), $(sz...))
-            $index = 1
+            $header
             $loopexpr
             result
         end
@@ -344,9 +399,17 @@ function gen_comp(T, body, iter)
 end
 
 macro comprehension(body, iter...)
-    gen_comp(nothing,body,iter)
+    gen_comp(nothing,body,iter,false)
 end
 
 macro typed_comprehension(T, body, iter...)
-    gen_comp(T,body,iter)
+    gen_comp(T,body,iter,false)
+end
+
+macro dict_comprehension(body,iter...)
+    gen_comp(nothing,body,iter,true)
+end
+
+macro typed_dict_comprehension(T,body,iter...)
+    gen_comp(T,body,iter,true)
 end
